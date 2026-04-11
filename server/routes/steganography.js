@@ -52,7 +52,7 @@ router.post('/encode', upload.single('image'), async (req, res, next) => {
     return res.status(400).json({ error: 'No image file uploaded.' });
   }
   if (!message) {
-    fs.unlink(inputPath, () => {});
+    fs.unlink(inputPath, () => { });
     return res.status(400).json({ error: 'Message cannot be empty.' });
   }
 
@@ -68,13 +68,13 @@ router.post('/encode', upload.single('image'), async (req, res, next) => {
     const stream = fs.createReadStream(outputPath);
     stream.pipe(res);
     stream.on('end', () => {
-      fs.unlink(inputPath, () => {});
-      fs.unlink(outputPath, () => {});
+      fs.unlink(inputPath, () => { });
+      fs.unlink(outputPath, () => { });
     });
     stream.on('error', next);
   } catch (err) {
-    fs.unlink(inputPath, () => {});
-    fs.unlink(outputPath, () => {});
+    fs.unlink(inputPath, () => { });
+    fs.unlink(outputPath, () => { });
     next(err);
   }
 });
@@ -91,10 +91,122 @@ router.post('/decode', upload.single('image'), async (req, res, next) => {
     const scriptPath = path.join(__dirname, '..', 'decode_server.py');
     const message = await runPython(scriptPath, [inputPath]);
 
-    fs.unlink(inputPath, () => {});
+    fs.unlink(inputPath, () => { });
     res.json({ message: message.trim() });
   } catch (err) {
+    fs.unlink(inputPath, () => { });
+    next(err);
+  }
+});
+
+// ── POST /api/stegdetect ─────────────────────────────────────────────────────
+// Chi-square statistical steganalysis — detect if image LIKELY contains data
+router.post('/stegdetect', upload.single('image'), async (req, res, next) => {
+  const inputPath = req.file?.path;
+  if (!inputPath) return res.status(400).json({ error: 'No image uploaded.' });
+
+  try {
+    const scriptPath = path.join(__dirname, '..', 'stegdetect_server.py');
+    const output = await runPython(scriptPath, [inputPath]);
+    const result = JSON.parse(output);
     fs.unlink(inputPath, () => {});
+    res.json(result);
+  } catch (err) {
+    if (inputPath) fs.unlink(inputPath, () => {});
+    next(err);
+  }
+});
+
+// ── POST /api/hash ────────────────────────────────────────────────────────────
+// SHA-256 hash + metadata for a single image file
+router.post('/hash', upload.single('image'), async (req, res, next) => {
+  const inputPath = req.file?.path;
+  if (!inputPath) return res.status(400).json({ error: 'No image uploaded.' });
+
+  try {
+    const scriptPath = path.join(__dirname, '..', 'hash_server.py');
+    const output = await runPython(scriptPath, [inputPath]);
+    const result = JSON.parse(output);
+    fs.unlink(inputPath, () => {});
+    res.json(result);
+  } catch (err) {
+    if (inputPath) fs.unlink(inputPath, () => {});
+    next(err);
+  }
+});
+
+// ── POST /api/analyze ────────────────────────────────────────────────────────
+// Standard differential scan — compare images and find changed pixels
+router.post('/analyze', upload.fields([{ name: 'original' }, { name: 'encoded' }]), async (req, res, next) => {
+  const origPath = req.files['original']?.[0]?.path;
+  const encPath = req.files['encoded']?.[0]?.path;
+
+  if (!origPath || !encPath) {
+    if (origPath) fs.unlink(origPath, () => {});
+    if (encPath) fs.unlink(encPath, () => {});
+    return res.status(400).json({ error: 'Both original and encoded images are required.' });
+  }
+
+  const outPath = path.join(os.tmpdir(), `forensic-heatmap-${uuidv4()}.png`);
+
+  try {
+    const scriptPath = path.join(__dirname, '..', 'analysis_v1.py');
+    const output = await runPython(scriptPath, [origPath, encPath, outPath]);
+    const result = JSON.parse(output);
+
+    // Read heatmap image as base64
+    const heatmapBuffer = fs.readFileSync(outPath);
+    result.heatmap = `data:image/png;base64,${heatmapBuffer.toString('base64')}`;
+
+    // Cleanup
+    fs.unlink(origPath, () => {});
+    fs.unlink(encPath, () => {});
+    fs.unlink(outPath, () => {});
+
+    res.json(result);
+  } catch (err) {
+    if (origPath) fs.unlink(origPath, () => {});
+    if (encPath) fs.unlink(encPath, () => {});
+    if (fs.existsSync(outPath)) fs.unlink(outPath, () => {});
+    next(err);
+  }
+});
+
+// ── POST /api/analyze-v2 ──────────────────────────────────────────────────────
+// Advanced region detection — compare images and find bounding box
+router.post('/analyze-v2', upload.fields([{ name: 'original' }, { name: 'encoded' }]), async (req, res, next) => {
+  const origPath = req.files['original']?.[0]?.path;
+  const encPath = req.files['encoded']?.[0]?.path;
+
+  if (!origPath || !encPath) {
+    if (origPath) fs.unlink(origPath, () => {});
+    if (encPath) fs.unlink(encPath, () => {});
+    return res.status(400).json({ error: 'Both original and encoded images are required.' });
+  }
+
+  const outPath = path.join(os.tmpdir(), `forensic-box-${uuidv4()}.png`);
+
+  try {
+    const scriptPath = path.join(__dirname, '..', 'forensic_engine.py');
+    const output = await runPython(scriptPath, [origPath, encPath, outPath]);
+    const result = JSON.parse(output);
+
+    if (result.error) throw new Error(result.error);
+
+    // Read heatmap image as base64
+    const heatmapBuffer = fs.readFileSync(outPath);
+    result.annotated_image = `data:image/png;base64,${heatmapBuffer.toString('base64')}`;
+
+    // Cleanup
+    fs.unlink(origPath, () => {});
+    fs.unlink(encPath, () => {});
+    fs.unlink(outPath, () => {});
+
+    res.json(result);
+  } catch (err) {
+    if (origPath) fs.unlink(origPath, () => {});
+    if (encPath) fs.unlink(encPath, () => {});
+    if (fs.existsSync(outPath)) fs.unlink(outPath, () => {});
     next(err);
   }
 });
